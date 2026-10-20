@@ -22,6 +22,32 @@ or off, and **DSpark** speculative decoding from the checkpoint's own draft bloc
 - Engine: TensorFold native (Zig 0.17.0), BertholomusAI's `dsv41` family at TP=2, one rank on each Spark
 - One command on the first Spark: `./start.sh` sets up both Sparks and starts both ranks; `./stop.sh` stops them
 
+## Start the model you want
+
+This pair serves **one model at a time**: a rank holds ~113 GiB of a Spark's 121 GiB unified memory, and a rank that takes
+all of it does not fail cleanly, it freezes the machine. Switching therefore means stopping one service and starting the
+other. Both sit behind the same endpoint, so a client only changes the model id it sends.
+
+| Serve | Run | Model id the client sends |
+| --- | --- | --- |
+| **DeepSeek-V4.1-Flash-1017** (this recipe) | `serve v41` | `DeepSeek-V4.1-Flash-1017` |
+| **DeepSeek-V4-Flash-0731** (vLLM + DSpark) | `serve v4` | `deepseek-v4-flash-0731` |
+| Whatever is up, to see the state | `serve status` | — |
+
+```bash
+serve v41        # stop what holds the memory, wait for free memory on both Sparks, start, wait for HTTP 200
+serve v4         # the same, the other way round
+serve status     # what is up, how much memory is free, which model answers
+```
+
+`serve` waits for both Sparks before it starts anything, so it is safe to run when a switch was interrupted. A warm start
+takes minutes (~98 GiB of weights per Spark); the first start on a fresh pair also writes the weight files and takes hours.
+
+`serve` and the units it drives live in [`deploy/`](deploy/) and are placed by `./deploy/install.sh` (Quick start, step 5).
+It is written for a pair that runs **both** of these services: it also drives the other one's systemd unit and reads its
+API key. On a pair that serves only this model, use `./start.sh` and `./stop.sh` instead — they are the recipe's own entry
+points, and everything above is a thin layer on top of them.
+
 ## Status
 
 What is checked, and how:
@@ -140,39 +166,94 @@ watchdog exists because that can freeze a Spark; see [Memory and safety](#memory
 
 ## Quick start
 
-On the head:
+Everything runs on the **head** Spark: the one that also serves the API. The worker needs no copy of this repository.
+
+### 1. Get the repository, set the one value only you know
 
 ```bash
-git clone https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks-TensorFold.git
-cd DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks-TensorFold
-cp scripts/local.sh.example scripts/local.sh     # set WORKER=user@192.0.2.2 in it (and FABRIC_PEER, see below)
-DRY_RUN=1 ./start.sh                              # prints what it would do; changes and starts nothing
+git clone https://github.com/xdrshjr/Aragon-DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks.git
+cd Aragon-DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks
+cp scripts/local.sh.example scripts/local.sh
+$EDITOR scripts/local.sh        # WORKER=user@<the worker's CX7 address>; FABRIC_PEER if it is on another network
+```
+
+`WORKER` is the worker's ssh target; the ranks talk over the route to it. Key-based ssh must already work:
+`ssh -o BatchMode=yes $WORKER true` has to succeed before anything else does.
+
+### 2. Check the wiring before anything moves
+
+```bash
+DRY_RUN=1 ./start.sh
+```
+
+It prints the CX7 link it found, the RoCE rails it will use, and both ranks' exact `docker run` commands, then stops. It
+stops nothing, downloads nothing, starts nothing. A wrong rail or cable is cheapest to find here.
+
+### 3. Prepare the pair (first time only, hours) and start
+
+```bash
 ./start.sh
 ```
 
-`WORKER` is the worker's ssh target. The ranks talk over the route to it: if it is on another network than the link, set
-`FABRIC_PEER` to the worker's CX7 address. The worker needs no copy of this repository.
-
-The first run sets up both Sparks (see below): the image on each (two Zig builds, ~6 minutes on a Spark), the checkpoint (196 GiB)
-and Engram's tables (~203 GB) downloaded on the head, the kit checked, both ranks' weight files written, Engram's tables
-and rank 1's weight file on the worker's disk. Later starts load ~98 GiB of weights on each Spark. `start.sh` shows each
-step and the server's log, runs a smoke test through both ranks, and prints `DeepSeek-V4.1-Flash-1017 is now LIVE!
-on port 8888` with the endpoint.
-
-Any OpenAI client works with `base_url = "http://<head-address>:8888/v1"` and the model `DeepSeek-V4.1-Flash-1017`.
-The model thinks before it answers unless a request turns thinking off, so give replies enough `max_tokens`.
+That one command does the setup when something is missing and then starts the server: it builds the engine image (~6
+minutes of Zig on a Spark), downloads the checkpoint (196 GiB) and Engram's tables (~203 GB), makes the kernel kit and
+both ranks' weight files (~106 GB each), and only then loads the weights. Expect hours the first time, and minutes
+after that. Every step is resumable: if it stops, run it again.
 
 ```bash
-./start.sh restart                                       # restart both ranks, e.g. after changing a setting
-./stop.sh                                                # stop both ranks and free their GPU memory
-docker logs -f dsv41-1017-exl3-tf                        # rank 0's log (here)
-ssh <worker> docker logs -f dsv41-1017-exl3-tf           # rank 1's log (why it exited, if it did)
-python3 tools/validate.py http://<head-address>:8888 --model DeepSeek-V4.1-Flash-1017   # text, thinking, tools, image, long prompt
-API_URL=http://<head-address>:8888 python3 tools/toolcheck.py    # also needle.py (a passphrase in ~195k tokens), end_of_turn.py
+./start.sh restart      # restart both ranks, e.g. after changing a setting
+./stop.sh               # stop both ranks and free their GPU memory
+docker logs -f dsv41-1017-exl3-tf                      # rank 0's log (here)
+ssh $WORKER docker logs -f dsv41-1017-exl3-tf          # rank 1's log (why it exited, if it did)
 ```
 
-`stop.sh` saves each rank's log (gzipped, newest 10 kept, `LOG_KEEP`) to `~/.cache/dsv41-tensorfold/logs` before it removes
-the container.
+`start.sh` shows each step and the server's log, runs a smoke test through both ranks, then prints
+`DeepSeek-V4.1-Flash-1017 is now LIVE! on port 8888`. `stop.sh` gzips each rank's log (newest 10 kept, `LOG_KEEP`) into
+`~/.cache/dsv41-tensorfold/logs` before it removes the container.
+
+### 4. Point a client at it
+
+```bash
+export API_URL=http://<head-address>:8888        # the port start.sh serves on (PORT)
+curl -s $API_URL/v1/models
+curl -s $API_URL/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "DeepSeek-V4.1-Flash-1017",
+  "messages": [{"role": "user", "content": "Hello"}],
+  "max_tokens": 64,
+  "chat_template_kwargs": {"enable_thinking": false}}'
+```
+
+Any OpenAI client works with `base_url = "http://<head-address>:8888/v1"` and the model `DeepSeek-V4.1-Flash-1017`. The
+model thinks before it answers unless a request turns thinking off, and `max_tokens` counts the reasoning too, so give
+replies room. `API_KEY=1 ./start.sh restart` requires `Authorization: Bearer $(cat ~/.local/state/dsv41-tensorfold/api-key)`.
+
+```bash
+python3 tools/smoke.py                                   # quick: health, streaming, a tool call, determinism
+python3 tools/validate.py $API_URL --model DeepSeek-V4.1-Flash-1017   # end to end: text, thinking, tools, image, long prompt
+```
+
+### 5. Optional: share the pair with a second service
+
+If another model already runs on these Sparks, put both behind one command instead of starting them by hand:
+
+```bash
+./deploy/install.sh      # places serve, prepare-v41, the systemd units and a narrowly scoped sudoers drop-in
+serve status             # the installer starts nothing; this reports what is already up
+~/bin/prepare-v41        # first time on this pair only: image, downloads, both weight files
+serve v41                # stop the other service, wait for memory, start this one, wait for HTTP 200
+```
+
+From then on `serve v41` / `serve v4` switch between them, and the client's `base_url` and API key stay valid.
+
+`serve` is written against the pair it was deployed on, so it carries that pair's details: the second service's directory
+and `.env.dspark` (where it reads the API key clients already use), its systemd unit name, the worker's CX7 addresses, and
+the proxy used for the image build. Point those at your own deployments before you rely on it; [`deploy/README.md`](deploy/README.md)
+says which file holds what.
+
+The runbook is [`docs/serve-two-models.md`](docs/serve-two-models.md) — including the four network problems
+`scripts/prepare.sh` assumes away on a real pair: GitHub resetting TLS during the kit fetch, an Xet bridge that answers
+`401` on the large shards, a worker that lacks the base image its NFS check runs in, and `hf download` refusing the
+~101 GB Engram shards outright.
 
 ## What `start.sh` and `scripts/prepare.sh` do
 
@@ -259,6 +340,8 @@ tools/prompt_reuse.py        a conversation resumes from its kept prompt state (
 tools/toolcheck.py, needle.py, end_of_turn.py, anthropiccheck.py   single checks, from the GLM-5.3-Flash recipe
 docs/zig-engine.md           how the pieces fit, and what is not verified
 docs/hermes-agent.md         Hermes Agent as a client (by Steve Darlow)
+docs/serve-two-models.md     two models on one pair, the switch script, and every network problem hit on a real pair
+deploy/                      serve (switch), prepare-v41 (proxy build), the download helpers, the units, an installer
 ```
 
 ## License
