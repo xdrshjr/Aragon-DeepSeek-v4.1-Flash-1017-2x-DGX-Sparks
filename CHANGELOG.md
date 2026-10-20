@@ -38,3 +38,29 @@
   return valid tool calls, auto/none/absent are unchanged).
 - `RANK1_PROFILE` (rank 1 `--profile`); both GPUs must share one clock ceiling; each Spark can run from a local copy of the
   cache (no NFS), with `PREPARE=0`.
+- **First deployment of the whole recipe on a real pair** (two GB10 Sparks, a head that also carries ~6 GiB of
+  desktop, workers reached over their CX7 links). Everything below came out of that run; the runbook is
+  `docs/serve-two-models.md` and the files are in `deploy/`.
+- `tools/validate.py` now sends the API key: it posted without an `Authorization` header, so against a server
+  started with `API_KEY=1` every case failed with `invalid_api_key` while `tools/smoke.py` passed. It resolves
+  the key the way `tools/client.py` does (`API_KEY`, else `API_KEY_FILE`).
+- Xet has to be off on this network: `hf-mirror.com`'s CAS bridge answers `401` on reconstructing the large
+  shards, while plain ranged HTTPS from the same mirror sustains ~56 MiB/s. `HF_HUB_DISABLE_XET=1`.
+- `hf download` cannot fetch Engram's tables at all: at ~101 GB each `huggingface_hub` refuses them on its
+  plain HTTP path and demands the Xet path that is broken here. `deploy/state/engram_download.py` drives
+  `curl -C -` ranged GETs instead (~49 MiB/s, resumable) straight into the snapshot directory.
+- `scripts/prepare.sh` needs two things this pair does not have by default. Its kit fetch is a bare
+  `git fetch` from GitHub, which resets the TLS connection here, so the kit has to be pre-placed at
+  `$HF_CACHE/tensorfold-dsv41/kit-<KIT_REF>` (note: not under `hub/`) through a proxy. And its NFS manifest
+  check runs `find` in `$BASE_IMAGE` **on the worker**, so the worker must already carry
+  `nvcr.io/nvidia/pytorch:26.07-py3` or the check silently becomes a 24 GB pull over the same flaky link.
+  `deploy/bin/prepare-v41` builds the image through a proxy with exactly `prepare.sh`'s arguments, and
+  `docker save | ssh <worker> docker load` moves the base image across the CX7 link in ~98 s.
+- `start.sh` with `API_KEY=1` generates a **new random** key when `~/.local/state/dsv41-tensorfold/api-key`
+  is missing. Starting the unit by hand therefore changes the key clients must send; `deploy/bin/serve`
+  writes the key you name into that file first (the engine rereads it, so no restart).
+- `deploy/bin/serve`: these two models cannot coexist (each rank holds ~113 GiB of a Spark's 121 GiB, and a
+  rank that takes all of it freezes the machine), so switching is stop-one/start-the-other behind the same
+  `:8000` entry point. Both services keep `127.0.0.1:8888`, so nginx and the client's `base_url` never change.
+- Copied trees from a Windows checkout carry CRLF: `./start.sh` then fails on `bash\r` and `git apply`
+  rejects every patch in `zig/patches/`.

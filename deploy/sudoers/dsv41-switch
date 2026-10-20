@@ -1,0 +1,1 @@
+aegiston02 ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block deepseek-v4-flash.service, /usr/bin/systemctl start --no-block dsv41-tensorfold.service, /usr/bin/systemctl stop deepseek-v4-flash.service, /usr/bin/systemctl stop dsv41-tensorfold.service, /usr/bin/systemctl reset-failed deepseek-v4-flash.service, /usr/bin/systemctl reset-failed dsv41-tensorfold.service

@@ -1,0 +1,21 @@
+[Unit]
+Description=DeepSeek-V4.1-Flash-1017 checkpoint + Engram tables download (resumable, Xet disabled)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=aegiston02
+Group=aegiston02
+Environment=HOME=/home/aegiston02
+Environment=PATH=/home/aegiston02/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HF_ENDPOINT=https://hf-mirror.com
+Environment=HF_HUB_DISABLE_XET=1
+Environment=HF_HUB_DISABLE_TELEMETRY=1
+ExecStart=/usr/bin/python3 /home/aegiston02/.local/state/dsv41-tensorfold/download.py
+StandardOutput=append:/home/aegiston02/.local/state/dsv41-tensorfold/download.log
+StandardError=append:/home/aegiston02/.local/state/dsv41-tensorfold/download.log
+TimeoutStartSec=86400
+
+[Install]
+WantedBy=multi-user.target

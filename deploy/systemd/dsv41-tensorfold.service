@@ -1,0 +1,27 @@
+[Unit]
+Description=DeepSeek-V4.1-Flash-1017 on two DGX Sparks (TensorFold native engine, TP=2)
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+# Not enabled on purpose: deepseek-v4-flash.service stays the boot default, and
+# only one of the two can hold the Spark's memory. Switch with ~/bin/serve v41.
+Conflicts=deepseek-v4-flash.service
+
+[Service]
+Type=simple
+User=aegiston02
+Group=aegiston02
+WorkingDirectory=/home/aegiston02/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks
+# FOREGROUND=1 keeps start.sh attached to rank 0's log so systemd can supervise it;
+# start.sh traps SIGTERM and runs ./stop.sh, which frees both ranks' memory.
+Environment=FOREGROUND=1
+ExecStart=/home/aegiston02/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/start.sh
+ExecStop=/home/aegiston02/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/stop.sh
+# A cold start loads ~98 GiB per Spark and may write the weight files first.
+TimeoutStartSec=14400
+TimeoutStopSec=600
+Restart=on-failure
+RestartSec=60
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

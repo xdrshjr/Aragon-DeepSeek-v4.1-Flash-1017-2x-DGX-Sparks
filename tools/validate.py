@@ -11,6 +11,7 @@ import base64
 import concurrent.futures as cf
 import io
 import json
+import os
 import struct
 import sys
 import time
@@ -25,8 +26,30 @@ COMPARE = args[args.index("--compare") + 1] if "--compare" in args else None
 failed = []
 
 
+def _api_key() -> str:
+    """The server's API key (start.sh with API_KEY=1): API_KEY, else the first key in API_KEY_FILE.
+
+    The same resolution tools/client.py uses, so a server started with API_KEY=1 can be validated here too.
+    """
+    key = os.environ.get("API_KEY", "").strip()
+    if key:
+        return key
+    path = os.environ.get("API_KEY_FILE", os.path.expanduser("~/.local/state/dsv41-tensorfold/api-key"))
+    try:
+        with open(path) as f:
+            line = next((x.strip() for x in f if x.strip() and not x.startswith("#")), "")
+    except OSError:
+        return ""
+    return line.split(":", 1)[1].strip() if ":" in line else line
+
+
+HEADERS = {"content-type": "application/json"}
+if _api_key():
+    HEADERS["Authorization"] = "Bearer " + _api_key()
+
+
 def post(body, timeout=900):
-    req = urllib.request.Request(URL + "/v1/chat/completions", json.dumps(body).encode(), {"content-type": "application/json"})
+    req = urllib.request.Request(URL + "/v1/chat/completions", json.dumps(body).encode(), HEADERS)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.load(r)

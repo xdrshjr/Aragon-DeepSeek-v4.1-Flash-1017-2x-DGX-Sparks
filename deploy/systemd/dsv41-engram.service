@@ -1,0 +1,15 @@
+[Unit]
+Description=DeepSeek-V4.1-Flash-1017 Engram tables download (curl range, resumable)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=aegiston02
+Group=aegiston02
+Environment=HOME=/home/aegiston02
+Environment=HF_ENDPOINT=https://hf-mirror.com
+ExecStart=/usr/bin/python3 /home/aegiston02/.local/state/dsv41-tensorfold/engram_download.py
+StandardOutput=append:/home/aegiston02/.local/state/dsv41-tensorfold/engram.log
+StandardError=append:/home/aegiston02/.local/state/dsv41-tensorfold/engram.log
+TimeoutStartSec=86400

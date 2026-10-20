@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Prepare the two Sparks for DeepSeek-V4.1-Flash-1017, building the engine image
+# through a proxy when GitHub is unreachable from here directly.
+#
+# scripts/prepare.sh builds the image with `docker build` and no proxy arguments.
+# GitHub is intermittently unreachable from this pair, so this wrapper builds the
+# image first, with the proxy that works here, and with exactly the arguments
+# prepare.sh would pass. prepare.sh then finds the image already built (its
+# tf.patches label matches) and moves on to the downloads and the weight files.
+#
+# Usage: prepare-v41 [--build-only | --rebuild]
+#   --build-only  build the image and stop (pure CPU: does not need the GPU or
+#                 the memory, so a running server stays up)
+#   --rebuild     rebuild the image from scratch, then run prepare.sh
+#   PROXY=http://192.168.1.13:7897   override the proxy (empty = no proxy)
+set -euo pipefail
+
+DIR=$HOME/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks
+PROXY=${PROXY-http://192.168.1.13:7897}
+
+log() { printf '[prepare-v41] %s\n' "$*"; }
+die() { printf '[prepare-v41] ERROR: %s\n' "$*" >&2; exit 1; }
+
+[[ -x $DIR/start.sh ]] || die "$DIR is not here"
+cd "$DIR"
+
+REBUILD=0
+BUILD_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --rebuild) REBUILD=1 ;;
+    --build-only) BUILD_ONLY=1 ;;
+    -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown argument: $arg" ;;
+  esac
+done
+
+# The pins, the tags and image_hash(): the same file prepare.sh reads.
+# shellcheck source=/dev/null
+source ./scripts/config.sh
+
+have=$(docker image inspect -f '{{index .Config.Labels "tf.patches"}}' "$IMAGE" 2>/dev/null || true)
+if [[ $REBUILD -eq 0 && "$have" == "$(image_hash)" ]]; then
+  log "image $IMAGE already built (label $have): nothing to build"
+else
+  docker image inspect "$BASE_IMAGE" >/dev/null 2>&1 ||
+    die "base image $BASE_IMAGE is missing: pull it first (docker pull $BASE_IMAGE)"
+  log "building $IMAGE (TensorFold ${TF_REF:0:12} + inputs ${INPUTS_REF:0:12})"
+  [[ -z "$PROXY" ]] || log "through the proxy $PROXY"
+  mkdir -p "$STATE_DIR"
+  ctx=$(mktemp -d "$STATE_DIR/build.XXXXXX")
+  trap 'rm -rf -- "$ctx"' EXIT
+  mkdir -p "$ctx/zig"
+  cp -r zig/patches "$ctx/zig/patches"
+  cp zig/Dockerfile "$ctx/Dockerfile"
+
+  args=(-t "$IMAGE" -f "$ctx/Dockerfile"
+        --build-arg BASE_IMAGE="$BASE_IMAGE"
+        --build-arg TF_REPO="$TF_REPO"
+        --build-arg TF_REF="$TF_REF"
+        --build-arg INPUTS_REF="$INPUTS_REF"
+        --build-arg ZIG_VERSION="$ZIG_VERSION"
+        --build-arg ZIG_SHA256="$ZIG_SHA256"
+        --build-arg PATCHES_HASH="$(image_hash)")
+  # Docker passes these into every RUN step without the Dockerfile declaring them.
+  [[ -z "$PROXY" ]] ||
+    args+=(--build-arg "http_proxy=$PROXY" --build-arg "https_proxy=$PROXY"
+           --build-arg "HTTP_PROXY=$PROXY" --build-arg "HTTPS_PROXY=$PROXY")
+  [[ $REBUILD -eq 0 ]] || args+=(--no-cache)
+
+  docker build "${args[@]}" "$ctx" || die "the image build failed"
+  rm -rf -- "$ctx"; trap - EXIT
+  [[ "$(docker image inspect -f '{{index .Config.Labels "tf.patches"}}' "$IMAGE")" == "$(image_hash)" ]] ||
+    die "the built image does not carry this pin's label"
+  log "image $IMAGE built ($(docker image inspect -f '{{.Size}}' "$IMAGE" | awk '{printf "%.1f GB", $1/1e9}'))"
+fi
+
+if [[ $BUILD_ONLY -eq 1 ]]; then
+  log "--build-only: stopping here (prepare.sh not run)"
+  exit 0
+fi
+
+log "handing over to scripts/prepare.sh (downloads, kit, weight files, NFS volume, worker files)"
+exec ./scripts/prepare.sh

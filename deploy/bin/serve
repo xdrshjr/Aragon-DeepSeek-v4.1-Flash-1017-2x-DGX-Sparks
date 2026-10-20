@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# Switch these two Sparks between the two inference services that share them.
+# Each service holds ~113 GiB of a Spark's 121 GiB unified memory, so exactly one
+# can run: this stops one before starting the other and never runs both.
+# Both listen on 127.0.0.1:8888; nginx on :8000 is the public entry and is never
+# touched, so a client's base_url and API key stay the same across a switch.
+#
+#   serve v41      DeepSeek-V4.1-Flash-1017 (TensorFold, EXL3 2.9 bpw)
+#   serve v4       DeepSeek-V4-Flash-0731 (vLLM + DSpark)
+#   serve status   what is up, on which ports, how much memory is free
+#
+# The boot default stays v4: deepseek-v4-flash.service is enabled, dsv41-tensorfold
+# .service is not.
+set -euo pipefail
+
+V41_DIR=$HOME/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks
+V4_ENV=$HOME/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark/.env.dspark
+V4_UNIT=deepseek-v4-flash.service
+V41_UNIT=dsv41-tensorfold.service
+WORKER=spark-worker-cx7
+LOCAL=127.0.0.1
+API_PORT=8888
+PUBLIC_PORT=8000
+MIN_AVAIL_GIB=112
+WAIT_API=2400
+
+log() { printf '[serve] %s\n' "$*"; }
+die() { printf '[serve] ERROR: %s\n' "$*" >&2; exit 1; }
+
+as_root() {
+  sudo -n "$@" 2>/dev/null || sudo "$@"
+}
+
+classic_key() {
+  sed -n 's/^VLLM_API_KEY=//p' "$V4_ENV" | head -1
+}
+
+mem_here() {
+  awk '/^MemAvailable:/ {printf "%.1f", $2 / 1048576}' /proc/meminfo
+}
+
+mem_there() {
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$WORKER" \
+    "awk '/^MemAvailable:/ {printf \"%.1f\", \$2 / 1048576}' /proc/meminfo" \
+    2>/dev/null || echo 0
+}
+
+http_code() {
+  curl -s -o /dev/null -m 5 -w '%{http_code}' \
+    -H "Authorization: Bearer $(classic_key)" \
+    "http://$LOCAL:$PUBLIC_PORT/v1/models" 2>/dev/null || true
+}
+
+wait_memory() {
+  local deadline=$((SECONDS + 300)) here there
+  while :; do
+    here=$(mem_here)
+    there=$(mem_there)
+    if awk -v a="$here" -v b="$there" -v m="$MIN_AVAIL_GIB" \
+        'BEGIN {exit !(a >= m && b >= m)}'; then
+      log "memory free: head $here GiB, worker $there GiB"
+      return 0
+    fi
+    (( SECONDS < deadline )) ||
+      die "still under $MIN_AVAIL_GIB GiB after 300 s (head $here, worker $there)"
+    sleep 5
+  done
+}
+
+wait_api() {
+  local what=$1 deadline=$((SECONDS + WAIT_API)) code
+  while :; do
+    code=$(http_code)
+    if [[ "$code" == 200 ]]; then
+      log "$what answers on :$PUBLIC_PORT"
+      return 0
+    fi
+    (( SECONDS < deadline )) ||
+      die "$what gave no 200 on :$PUBLIC_PORT in ${WAIT_API}s (last: $code)"
+    sleep 15
+  done
+}
+
+stop_v4() {
+  if systemctl is-active --quiet "$V4_UNIT"; then
+    log "stopping $V4_UNIT"
+    as_root systemctl stop "$V4_UNIT"
+  else
+    log "$V4_UNIT already stopped"
+  fi
+  as_root systemctl reset-failed "$V4_UNIT" || true
+}
+
+stop_v41() {
+  if systemctl is-active --quiet "$V41_UNIT"; then
+    log "stopping $V41_UNIT"
+    as_root systemctl stop "$V41_UNIT"
+  else
+    log "$V41_UNIT already stopped"
+  fi
+  as_root systemctl reset-failed "$V41_UNIT" || true
+}
+
+ensure_key_file() {
+  local file=$HOME/.local/state/dsv41-tensorfold/api-key key
+  key=$(classic_key)
+  [[ -n "$key" ]] || die "no VLLM_API_KEY in $V4_ENV"
+  mkdir -p "$(dirname "$file")"
+  # The v4 key, unchanged: clients keep sending what they send today.
+  ( umask 077; printf '%s\n' "$key" > "$file" )
+  chmod 600 "$file"
+  log "API key for v4.1: the v4 key ($(wc -c < "$file") bytes in $file)"
+}
+
+start_v41() {
+  [[ -x $V41_DIR/start.sh ]] || die "$V41_DIR/start.sh is missing"
+  ensure_key_file
+  log "starting $V41_UNIT (loads ~98 GiB per Spark; follow with: journalctl -fu $V41_UNIT)"
+  as_root systemctl start --no-block "$V41_UNIT"
+}
+
+start_v4() {
+  log "starting $V4_UNIT (vLLM cold start, minutes)"
+  as_root systemctl start --no-block "$V4_UNIT"
+}
+
+status() {
+  local here there code
+  here=$(mem_here)
+  there=$(mem_there)
+  code=$(http_code)
+  printf 'public :%-5s  %s\n' "$PUBLIC_PORT" \
+    "$([[ "$code" == 200 ]] && echo "answering (HTTP 200)" || echo "HTTP ${code:-none}")"
+  printf 'v4   :%-5s  %s\n' "unit" "$(systemctl is-active "$V4_UNIT" || true)"
+  printf 'v41  :%-5s  %s\n' "unit" "$(systemctl is-active "$V41_UNIT" || true)"
+  printf 'memory      head %s GiB free, worker %s GiB free\n' "$here" "$there"
+  if [[ "$code" == 200 ]]; then
+    printf 'serving     %s\n' "$(curl -s -m 5 -H "Authorization: Bearer $(classic_key)" \
+      "http://$LOCAL:$PUBLIC_PORT/v1/models" |
+      python3 -c 'import json,sys; print(", ".join(m["id"] for m in json.load(sys.stdin)["data"]))' \
+      2>/dev/null || echo unknown)"
+  fi
+  docker ps --format '  {{.Names}}  {{.Status}}' 2>/dev/null | head -5
+}
+
+case "${1:-status}" in
+  v41)
+    stop_v4
+    wait_memory
+    start_v41
+    wait_api "DeepSeek-V4.1-Flash-1017"
+    status
+    ;;
+  v4)
+    stop_v41
+    wait_memory
+    start_v4
+    wait_api "DeepSeek-V4-Flash-0731"
+    status
+    ;;
+  status) status ;;
+  *)
+    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+esac
