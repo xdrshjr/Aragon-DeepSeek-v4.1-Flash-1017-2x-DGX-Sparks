@@ -579,6 +579,7 @@ docs/PORT-RECIPE.md          the GLM port's settings, their engine mapping, depl
 docs/FORK-DEPLOY.md          updating and rolling back the port fork that serves on gx10-a
 docs/hermes-agent.md         Hermes Agent as a client (by Steve Darlow)
 docs/serve-two-models.md     two models on one pair, the switch script, and every network problem hit on a real pair
+docs/deploy-notes.md         this pair's upgrade runbook: the pinned revision, the image change, and the two traps
 deploy/                      serve (switch), prepare-v41 (proxy build), the download helpers, the units, an installer
 ```
 
