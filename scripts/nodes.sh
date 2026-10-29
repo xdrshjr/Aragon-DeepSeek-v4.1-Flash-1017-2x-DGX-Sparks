@@ -89,6 +89,24 @@ ensure_nfs_volume() {
   fi
 }
 worker_nfs() { local i=$1; shift; worker "$i" "docker run --rm --entrypoint '$1' -v '$NFS_VOLUME:/hf:ro' '$IMAGE' $(printf '%q ' "${@:2}")"; }
+# Check the worker's actual file view, not just a successful mount or a prepared marker.
+# Also works with the documented PREPARE=0 / host-path NFS_VOLUME setup: do not create a volume here.
+worker_files_check() {
+  local i=$1 out
+  if out=$(worker_nfs "$i" sh -ec '
+    for f in "$@"; do
+      if [ ! -f "$f" ] || [ ! -r "$f" ] || [ ! -s "$f" ]; then
+        echo "Missing, empty or unreadable on worker: $f" >&2
+        exit 1
+      fi
+    done
+  ' sh "$(model_in_container)/config.json" "/hf/$KIT_SUB/kit/MANIFEST" "/hf/$DATA_SUB/dsv41_token_map.json" 2>&1); then
+    return 0
+  fi
+  printf '%s\n' "$out" >&2
+  die "$(worker_host "$i") cannot read the model/kit through $NFS_VOLUME (NFS :$NFS_PATH from $(nfs_server "$i")). Check the actual NFSv4 root, stale file handles and competing host/container NFS servers (README: NFS); for a host-path mount check that worker's local files. No ranks were launched by this check"
+}
+
 # link_info <peer address>: this node's side of the link to <peer>: "<address> <netdev> <rdma device> <gid index>".
 # The netdev and source address come from the route to the peer; the RDMA device from sysfs; the GID index is the
 # RoCE v2 entry that holds this node's IPv4 address (an all-zero or v1 entry makes NCCL fail about a minute in).
@@ -321,22 +339,43 @@ head_hf_mount() {
 }
 
 # mem_available_gib: MemAvailable here, in GiB (one decimal)
-mem_available_gib() { awk '/^MemAvailable:/ {printf "%.1f", $2 / 1048576}' /proc/meminfo; }
+# mem_available_gib: what start.sh's MIN_AVAIL_GIB check counts here, MemAvailable plus the pages parked on the per-CPU
+# free lists (mem_counting below; plain MemAvailable if /proc/zoneinfo cannot be read)
+mem_available_gib() { local m; m=$(mem_counting 2>/dev/null) && echo "${m%% *}" || awk '/^MemAvailable:/ {printf "%.1f", $2 / 1048576}' /proc/meminfo; }
+# mem_counting: MemAvailable plus the pages parked on the per-CPU free lists, as the engine's startup budget counts it
+# (scripts/memavail.sh; start.sh's MIN_AVAIL_GIB check)
+source "${_cfg_root:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts/memavail.sh"
+
+# await_memory: sets HERE_GB and WORKER_GB (GiB) to the memory available on this Spark and on worker 1, once both reach
+# MIN_AVAIL_GIB or after MIN_AVAIL_WAIT_S seconds at the latest (returns 1 then; the caller words the refusal). A build or a large
+# copy that has just ended leaves page cache that MemAvailable counts only as it is written back (111.6 GiB was read a few
+# seconds after a build, 119 GiB once it settled), so one reading right after it refuses a start the Spark can take.
+await_memory() {
+  local waited=0
+  while :; do
+    HERE_GB=$(mem_available_gib)
+    WORKER_GB=$(worker 1 "$(declare -f mem_counting mem_available_gib); mem_available_gib" 2>/dev/null || echo 0)
+    awk -v a="$HERE_GB" -v b="$WORKER_GB" -v m="$MIN_AVAIL_GIB" 'BEGIN {exit !(a >= m && b >= m)}' && return 0
+    (( waited < MIN_AVAIL_WAIT_S )) || return 1
+    sleep 2
+    waited=$((waited + 2))
+  done
+}
 
 # The memory guard (scripts/memguard.sh) on this Spark and on the worker, which gets a copy of the script.
 MEMGUARD_REMOTE_DIR='$HOME/.cache/dsv41-tensorfold'
 memguard_start() {
   awk -v g="$MEMGUARD_GIB" 'BEGIN {exit !(g > 0)}' || return 0
-  "$_cfg_root/scripts/memguard.sh" start "$CONTAINER_NAME" "$MEMGUARD_GIB" "$LOG_DIR/memguard.log" "$STATE_DIR/memguard.pid" ||
+  "$_cfg_root/scripts/memguard.sh" start "$CONTAINER_NAME" "$MEMGUARD_GIB" "$LOG_DIR/memguard.log" "$STATE_DIR/memguard.pid" "$MEMGUARD_HOLD_S" "$MEMGUARD_HARD_GIB" ||
     die "the memory guard did not start here"
   local i
   for i in $(worker_ids); do
     worker "$i" "mkdir -p $MEMGUARD_REMOTE_DIR/logs && cat > $MEMGUARD_REMOTE_DIR/memguard.sh && chmod +x $MEMGUARD_REMOTE_DIR/memguard.sh" \
       < "$_cfg_root/scripts/memguard.sh" || die "could not copy the memory guard to $(worker_host "$i")"
-    worker "$i" "$MEMGUARD_REMOTE_DIR/memguard.sh start '$CONTAINER_NAME' $MEMGUARD_GIB $MEMGUARD_REMOTE_DIR/logs/memguard.log $MEMGUARD_REMOTE_DIR/memguard.pid" ||
+    worker "$i" "$MEMGUARD_REMOTE_DIR/memguard.sh start '$CONTAINER_NAME' $MEMGUARD_GIB $MEMGUARD_REMOTE_DIR/logs/memguard.log $MEMGUARD_REMOTE_DIR/memguard.pid $MEMGUARD_HOLD_S $MEMGUARD_HARD_GIB" ||
       die "the memory guard did not start on $(worker_host "$i")"
   done
-  log "Memory guard on: each rank's container is killed when the memory available stays under $MEMGUARD_GIB GiB (log: memguard.log)"
+  log "Memory guard on: each rank's container is killed when the memory available stays under $MEMGUARD_GIB GiB for $MEMGUARD_HOLD_S s, or falls under $MEMGUARD_HARD_GIB GiB (log: memguard.log)"
 }
 memguard_stop() {
   local i

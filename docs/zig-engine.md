@@ -10,7 +10,7 @@ serves the API and drives the rounds, rank 1 (`tf-dsv41-lanes`) follows. Credits
 
 | Part | Source |
 | --- | --- |
-| `tensorfold-native`, `tf-dsv41-lanes` | BertholomusAI's `bertholomus/TensorFold`, branch `deepseek-v41-zig`, commit `3ff3b2ac` (`TF_REF`), plus `zig/patches/*.patch` (none yet), built with Zig 0.17.0 and nvcc (sm_121 fatbins are embedded in the binary) |
+| `tensorfold-native`, `tf-dsv41-lanes` | BertholomusAI's `bertholomus/TensorFold`, branch `deepseek-v41-zig`, commit `629c524` (`TF_REF`), plus `zig/patches/*.patch` (applied in filename order; [`../zig/patches/README.md`](../zig/patches/README.md)), built with Zig 0.17.0 and nvcc (sm_121 fatbins are embedded in the binary) |
 | `tf-dsv41-rank-cache`, `make_token_map.py`, `make_rope.py`, `make_bias_vl.py` | the same fork's branch `deepseek-v41-zig-tp4`, commit `5940208` (`INPUTS_REF`); only these four files are kept |
 | the kernel kit (`TF_DS_KIT`, `TENSORFOLD_CUDA_KERNELS=<kit>/aot`) | not in the image: `kit/` of BertholomusAI's `deepseek-v4.1-tensorfold-tp2-2xgb10` at `abe07c7` (`KIT_REF`), fetched by `scripts/prepare.sh` into the Hugging Face cache and read by both ranks over NFS |
 
@@ -48,7 +48,9 @@ How `scripts/config.sh` reaches the two commands (the flags and variables are th
 | `ROUND_ROWS` | `TF_DS_ROUND_ROWS` | `--round-rows` |
 | `DRAFTS` | `--no-drafts` when 0 | `--drafts` |
 | `GRAPHS`, `SIDE`, `PREFETCH`, `ENGRAM_AIO` | `TF_DS_GRAPHS`, `TF_DS_HC_SIDE`, `TF_DS_L2_PREFETCH`, `TF_DS_ENGRAM_AIO` | `--graphs`, `--side`, `--prefetch`, `--aio` |
+| `GRAPH_CAP` | `TF_DS_GRAPH_CAP` | `--graph-cap` (`zig/patches/0033`) |
 | `RDMA` | `TF_RDMA_DEVICES`, `TF_RDMA_GID_INDEX` | `--rdma`, `TF_RDMA_GID_INDEX` |
+| `RDMA_IDLE_S`, `RDMA_NAP_US` | `TF_RDMA_IDLE_S`, `TF_RDMA_NAP_US` | the same, through `ENGINE_ENV` (`zig/patches/0010`; recipe default 2 s / 500 µs) |
 | `REPLAY_FLOOR` | `TF_DS_REPLAY_FLOOR` | `TF_DS_REPLAY_FLOOR` |
 | `MAX_TOKENS`, `THINKING`, `REASONING_EFFORT`, `TEMPERATURE`, `TOP_P`, `TOP_K`, `SERVED_NAME`, `HOST`, `PORT` | the same-named serve flags | |
 | `MASTER_ADDR`, `MASTER_PORT` | `TF_TP_MASTER`, `TF_TP_PORT`, `TF_TP_WORLD=2` | the positional arguments |

@@ -17,7 +17,7 @@
 
 <!--
 
-    Add the list of issues related to this PR from the [issue tracker](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks-TensorFold/issues).
+    Add the list of issues related to this PR from the [issue tracker](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/issues).
     Indicate which of these issues are resolved or fixed by this PR, like #XXXX, where XXXX is the issue number.
 
 -->
