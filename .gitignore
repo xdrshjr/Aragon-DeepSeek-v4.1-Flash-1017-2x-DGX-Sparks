@@ -1,3 +1,6 @@
 scripts/local.sh
 .env
 __pycache__/
+# agent context generated locally by project-indexer
+CLAUDE.md
+.claude-index/
